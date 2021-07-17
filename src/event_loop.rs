@@ -160,6 +160,10 @@ impl<T> EventLoop<T> {
             event_loop_proxy: self.event_loop.create_proxy(),
         }
     }
+
+    pub fn as_async(self) -> platform_impl::AsyncEventLoop<T> {
+        self.event_loop.as_async()
+    }
 }
 
 impl<T> Deref for EventLoop<T> {

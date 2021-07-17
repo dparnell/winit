@@ -50,6 +50,9 @@ use crate::{
     window::{Fullscreen, WindowId as RootWindowId},
 };
 use runner::{EventLoopRunner, EventLoopRunnerShared};
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 type GetPointerFrameInfoHistory = unsafe extern "system" fn(
     pointerId: UINT,
@@ -242,6 +245,72 @@ impl<T: 'static> EventLoop<T> {
             target_window: self.window_target.p.thread_msg_target,
             event_send: self.thread_msg_sender.clone(),
         }
+    }
+
+    pub fn as_async(self) -> AsyncEventLoop<T> {
+        AsyncEventLoop::new(self)
+    }
+}
+
+pub struct AsyncEventLoop<T: 'static> {
+    event_loop: EventLoop<T>,
+    receiver: Receiver<Event<'static, T>>
+}
+
+impl<T> AsyncEventLoop<T> {
+    pub fn new(event_loop: EventLoop<T>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        unsafe {
+            event_loop.window_target
+                .p
+                .runner_shared
+                .set_event_handler(move |event, control_flow| {
+                    if let Some(event) = event.to_static() {
+                        tx.send(event).unwrap();
+                    }
+                    *control_flow = ControlFlow::Poll;
+                });
+        }
+
+        AsyncEventLoop {
+            event_loop,
+            receiver: rx
+        }
+    }
+}
+
+impl<T> Future for AsyncEventLoop<T> {
+    type Output = Event<'static, T>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Ok(event) = self.receiver.try_recv() {
+            return Poll::Ready(event);
+        }
+
+        let runner = &self.event_loop.window_target.p.runner_shared;
+        unsafe {
+            let mut msg = mem::zeroed();
+
+            runner.poll();
+            if 0 == winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) {
+                return Poll::Pending;
+            }
+            winuser::TranslateMessage(&mut msg);
+            winuser::DispatchMessageW(&mut msg);
+
+            if let Ok(event) = self.receiver.try_recv() {
+                return Poll::Ready(event);
+            }
+
+            if let Err(payload) = runner.take_panic_error() {
+                runner.reset_runner();
+                panic::resume_unwind(payload);
+            }
+
+        }
+
+        Poll::Pending
     }
 }
 
